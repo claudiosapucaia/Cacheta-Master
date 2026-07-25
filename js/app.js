@@ -1,298 +1,35 @@
-let estado = carregarEstado();
-let modoSelecionado = "rapido";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+import { getDatabase, ref, set, get, update, onValue, push } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
+import { firebaseConfig } from "./firebase-config.js";
 
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
 const $ = id => document.getElementById(id);
+const views=["homeView","createView","joinView","lobbyView","gameView"];
+const state={roomCode:null,playerId:localStorage.getItem("cm_playerId")||crypto.randomUUID(),isHost:false,roomUnsub:null,room:null};
+localStorage.setItem("cm_playerId",state.playerId);
 
-function esc(texto) {
-  return String(texto).replace(/[&<>"']/g, caractere => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[caractere]));
-}
+function show(view){views.forEach(v=>$(v).classList.toggle("active",v===view));$("homeBtn").classList.toggle("hidden",view==="homeView")}
+function toast(msg){$("toast").textContent=msg;$("toast").classList.add("show");setTimeout(()=>$("toast").classList.remove("show"),2600)}
+function makeCode(){const c="ABCDEFGHJKLMNPQRSTUVWXYZ23456789";return Array.from({length:6},()=>c[Math.floor(Math.random()*c.length)]).join("")}
+function roomRef(code){return ref(db,`rooms/${code}`)}function playerRef(code,id){return ref(db,`rooms/${code}/players/${id}`)}function now(){return Date.now()}
+function esc(s=""){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]))}
 
-function abrirTela(id) {
-  document.querySelectorAll(".tela").forEach(tela => tela.classList.toggle("ativa", tela.id === id));
-  document.querySelectorAll("nav button").forEach(botao => botao.classList.toggle("ativo", botao.dataset.tela === id));
+$("newGameBtn").onclick=()=>show("createView");$("joinGameBtn").onclick=()=>show("joinView");$("homeBtn").onclick=()=>location.href=location.pathname;
+$("createGameBtn").onclick=async()=>{const hostName=$("hostName").value.trim();if(!hostName)return toast("Digite seu nome.");let code=makeCode();while((await get(roomRef(code))).exists())code=makeCode();const hostToken=crypto.randomUUID();localStorage.setItem(`cm_host_${code}`,hostToken);await set(roomRef(code),{name:$("gameName").value.trim()||"Partida de Cacheta",code,status:"lobby",createdAt:now(),hostToken,players:{[state.playerId]:{name:hostName,score:10,joinedAt:now(),active:true}},history:{}});state.roomCode=code;state.isHost=true;location.hash=code;subscribeRoom(code)};
+$("joinRoomBtn").onclick=async()=>{const code=$("roomCodeInput").value.trim().toUpperCase(),name=$("playerName").value.trim();if(code.length!==6)return toast("Digite o código com 6 caracteres.");if(!name)return toast("Digite seu nome.");const snap=await get(roomRef(code));if(!snap.exists())return toast("Partida não encontrada.");const room=snap.val();if(room.status==="finished")return toast("Esta partida já foi encerrada.");await set(playerRef(code,state.playerId),{name,score:10,joinedAt:now(),active:true});state.roomCode=code;state.isHost=localStorage.getItem(`cm_host_${code}`)===room.hostToken;location.hash=code;subscribeRoom(code)};
 
-  if (id === "partida") renderPartida();
-  if (id === "historico") renderHistorico();
-  if (id === "ranking") renderRanking();
-}
-
-function adicionarCampo(nome = "") {
-  const quantidade = document.querySelectorAll(".jogador-input").length;
-  if (quantidade >= 10) return alert("Limite de 10 jogadores.");
-
-  const linha = document.createElement("div");
-  linha.className = "jogador-input";
-  linha.innerHTML = `
-    <input maxlength="22" placeholder="Nome do jogador ${quantidade + 1}" value="${esc(nome)}">
-    <button class="remover" aria-label="Remover jogador">×</button>
-  `;
-
-  linha.querySelector(".remover").onclick = () => {
-    if (document.querySelectorAll(".jogador-input").length <= 2) {
-      return alert("Mínimo de 2 jogadores.");
-    }
-    linha.remove();
-  };
-
-  $("jogadoresInputs").appendChild(linha);
-}
-
-function iniciar() {
-  const nomes = [...document.querySelectorAll(".jogador-input input")]
-    .map(input => input.value.trim())
-    .filter(Boolean);
-
-  if (nomes.length < 2) return alert("Digite pelo menos 2 jogadores.");
-  if (new Set(nomes.map(nome => nome.toLowerCase())).size !== nomes.length) {
-    return alert("Não use nomes repetidos.");
-  }
-
-  estado.partida = criarPartida({
-    nome: $("nomePartida").value.trim(),
-    local: $("localPartida").value.trim(),
-    modo: modoSelecionado,
-    jogadores: nomes
-  });
-
-  estado.pilha = [];
-  salvarEstado(estado);
-  abrirTela("partida");
-}
-
-function snapshot() {
-  estado.pilha.push(JSON.stringify(estado.partida));
-  if (estado.pilha.length > 50) estado.pilha.shift();
-}
-
-function alterarPontos(indice, delta) {
-  if (!estado.partida) return;
-  snapshot();
-  aplicarPontos(estado.partida, indice, delta);
-  salvarEstado(estado);
-  renderPartida();
-  checarCampeao();
-}
-
-function checarCampeao() {
-  const vencedor = vencedorAtual(estado.partida);
-  if (vencedor) finalizar(vencedor.nome, true);
-}
-
-function renderPartida() {
-  if (!estado.partida) {
-    $("partidaTitulo").textContent = "Nenhuma partida";
-    $("partidaSubtitulo").textContent = "Crie uma partida no início";
-    $("placar").innerHTML = '<div class="vazio">Nenhuma partida em andamento.</div>';
-    $("painelRodada").classList.add("oculto");
-    $("painelRapido").classList.remove("oculto");
-    return;
-  }
-
-  const partida = estado.partida;
-  $("partidaTitulo").textContent = partida.nome;
-  $("partidaSubtitulo").textContent = partida.local || "Partida atual";
-  $("rodadaAtual").textContent = `Rodada ${partida.rodada}`;
-
-  $("painelRapido").classList.toggle("oculto", partida.modo !== "rapido");
-  $("painelRodada").classList.toggle("oculto", partida.modo !== "rodada");
-
-  $("placar").innerHTML = partida.jogadores
-    .filter(jogador => jogador.pontos > 0)
-    .map(jogador => {
-      const indice = partida.jogadores.indexOf(jogador);
-      return `
-        <article class="jogador-card">
-          <div class="jogador-head">
-            <div class="nome">${esc(jogador.nome)}</div>
-            <div class="pontos">${jogador.pontos}</div>
-          </div>
-          <div class="acoes-jogador">
-            <button class="acao desistiu" onclick="alterarPontos(${indice}, -1)">Desistiu -1</button>
-            <button class="acao perdeu" onclick="alterarPontos(${indice}, -2)">Perdeu -2</button>
-            <button class="acao ajuste" onclick="alterarPontos(${indice}, 1)">+1</button>
-          </div>
-        </article>
-      `;
-    }).join("");
-
-  renderResultados();
-}
-
-function renderResultados() {
-  if (!estado.partida) return;
-
-  const partida = estado.partida;
-  $("listaResultados").innerHTML = partida.jogadores
-    .filter(jogador => jogador.pontos > 0)
-    .map(jogador => {
-      const indice = partida.jogadores.indexOf(jogador);
-      const atual = partida.resultados[indice] ?? 0;
-
-      return `
-        <div class="resultado-item">
-          <div class="resultado-nome">${esc(jogador.nome)} — ${jogador.pontos} pontos</div>
-          <div class="resultado-opcoes">
-            <button class="${atual === 0 ? "ativo" : ""}" onclick="marcarResultado(${indice}, 0)">Venceu 0</button>
-            <button class="${atual === -1 ? "ativo" : ""}" onclick="marcarResultado(${indice}, -1)">Desistiu -1</button>
-            <button class="${atual === -2 ? "ativo" : ""}" onclick="marcarResultado(${indice}, -2)">Perdeu -2</button>
-          </div>
-        </div>
-      `;
-    }).join("");
-}
-
-function marcarResultado(indice, valor) {
-  estado.partida.resultados[indice] = valor;
-  salvarEstado(estado);
-  renderResultados();
-}
-
-function confirmarRodada() {
-  if (!estado.partida) return;
-
-  snapshot();
-  Object.entries(estado.partida.resultados).forEach(([indice, valor]) => {
-    aplicarPontos(estado.partida, Number(indice), Number(valor));
-  });
-
-  estado.partida.resultados = {};
-  estado.partida.rodada++;
-  salvarEstado(estado);
-  renderPartida();
-  checarCampeao();
-}
-
-function novaRodada() {
-  if (!estado.partida) return;
-  snapshot();
-  estado.partida.rodada++;
-  salvarEstado(estado);
-  renderPartida();
-}
-
-function finalizar(vencedorNome = null, automatico = false) {
-  if (!estado.partida) return;
-
-  const ativos = [...jogadoresAtivos(estado.partida)].sort((a, b) => b.pontos - a.pontos);
-  const vencedor = vencedorNome || ativos[0]?.nome || "Sem campeão";
-
-  estado.historico.unshift({
-    id: estado.partida.id,
-    nome: estado.partida.nome,
-    local: estado.partida.local,
-    data: new Date().toISOString(),
-    vencedor,
-    rodadas: estado.partida.rodada,
-    jogadores: estado.partida.jogadores
-  });
-
-  estado.historico = estado.historico.slice(0, 100);
-  estado.ranking[vencedor] = (estado.ranking[vencedor] || 0) + 1;
-  estado.partida = null;
-  estado.pilha = [];
-  salvarEstado(estado);
-
-  $("nomeCampeao").textContent = `${vencedor} é o campeão!`;
-
-  if (automatico && $("dialogCampeao").showModal) {
-    $("dialogCampeao").showModal();
-  } else {
-    alert(`Campeão: ${vencedor}`);
-    abrirTela("historico");
-  }
-}
-
-function renderHistorico() {
-  const area = $("listaHistorico");
-
-  if (!estado.historico.length) {
-    area.innerHTML = '<div class="vazio">Ainda não há partidas encerradas.</div>';
-    return;
-  }
-
-  area.innerHTML = estado.historico.map(item => `
-    <div class="item">
-      🏆 <strong>${esc(item.vencedor)}</strong>
-      <small>${esc(item.nome)}${item.local ? ` — ${esc(item.local)}` : ""}</small>
-      <small>${new Date(item.data).toLocaleString("pt-BR")} — ${item.rodadas} rodada(s)</small>
-      <small>${[...item.jogadores].sort((a, b) => b.pontos - a.pontos).map(j => `${esc(j.nome)}: ${j.pontos}`).join(" • ")}</small>
-    </div>
-  `).join("");
-}
-
-function renderRanking() {
-  const area = $("listaRanking");
-  const itens = Object.entries(estado.ranking).sort((a, b) => b[1] - a[1]);
-
-  if (!itens.length) {
-    area.innerHTML = '<div class="vazio">O ranking aparecerá após a primeira partida.</div>';
-    return;
-  }
-
-  area.innerHTML = itens.map(([nome, vitorias], indice) => `
-    <div class="item rank">
-      <div class="pos">${indice + 1}</div>
-      <strong>${esc(nome)}</strong>
-      <div class="wins">${vitorias} vitória${vitorias === 1 ? "" : "s"}</div>
-    </div>
-  `).join("");
-}
-
-document.querySelectorAll(".modo").forEach(botao => {
-  botao.onclick = () => {
-    modoSelecionado = botao.dataset.modo;
-    document.querySelectorAll(".modo").forEach(item => item.classList.toggle("ativo", item === botao));
-  };
-});
-
-document.querySelectorAll("nav button").forEach(botao => {
-  botao.onclick = () => abrirTela(botao.dataset.tela);
-});
-
-$("adicionarJogador").onclick = () => adicionarCampo();
-$("iniciarPartida").onclick = iniciar;
-$("novaRodadaRapida").onclick = novaRodada;
-$("confirmarRodada").onclick = confirmarRodada;
-
-$("desfazer").onclick = () => {
-  const anterior = estado.pilha.pop();
-  if (!anterior) return alert("Nada para desfazer.");
-  estado.partida = JSON.parse(anterior);
-  salvarEstado(estado);
-  renderPartida();
-};
-
-$("encerrar").onclick = () => {
-  if (!estado.partida) return alert("Não há partida em andamento.");
-  if (confirm("Encerrar e salvar esta partida?")) finalizar();
-};
-
-$("limparHistorico").onclick = () => {
-  if (confirm("Apagar histórico e ranking?")) {
-    estado.historico = [];
-    estado.ranking = {};
-    salvarEstado(estado);
-    renderHistorico();
-    renderRanking();
-  }
-};
-
-$("fecharCampeao").onclick = () => {
-  $("dialogCampeao").close();
-  abrirTela("historico");
-};
-
-window.alterarPontos = alterarPontos;
-window.marcarResultado = marcarResultado;
-
-for (let i = 0; i < 3; i++) adicionarCampo();
-
-renderPartida();
-renderHistorico();
-renderRanking();
-
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => navigator.serviceWorker.register("./service-worker.js"));
-}
+function subscribeRoom(code){if(state.roomUnsub)state.roomUnsub();state.roomCode=code;state.roomUnsub=onValue(roomRef(code),snap=>{if(!snap.exists()){toast("Partida não encontrada.");show("homeView");return}const room=snap.val();state.room=room;state.isHost=localStorage.getItem(`cm_host_${code}`)===room.hostToken;renderRoom(room)})}
+function playersArray(room){return Object.entries(room.players||{}).map(([id,p])=>({id,...p})).sort((a,b)=>(b.score??0)-(a.score??0)||(a.joinedAt??0)-(b.joinedAt??0))}
+function renderRoom(room){$("statusText").textContent=room.status==="lobby"?"Aguardando jogadores":"Partida ao vivo";if(room.status==="lobby"){show("lobbyView");$("roomCodeDisplay").textContent=room.code;$("lobbyTitle").textContent=room.name;const ps=playersArray(room);$("playerCount").textContent=ps.length;$("lobbyPlayers").innerHTML=ps.map(p=>`<div class="player-row"><div><div class="player-name">${esc(p.name)}</div><div class="player-sub">${p.id===state.playerId?"Você":""}</div></div><span>10 pontos</span></div>`).join("");$("lobbyHint").classList.toggle("hidden",ps.length>0);$("startGameBtn").classList.toggle("hidden",!state.isHost);renderQR(room.code)}else{show("gameView");$("gameTitle").textContent=room.name;$("liveRoomCode").textContent=room.code;renderScoreboard(room);renderControls(room);renderHistory(room)}}
+function renderQR(code){const box=$("qrCode");box.innerHTML="";const url=`${location.origin}${location.pathname}#${code}`;if(window.QRCode)new QRCode(box,{text:url,width:150,height:150})}
+function renderScoreboard(room){const ps=playersArray(room),active=ps.filter(p=>(p.score??0)>0),winnerId=room.status==="finished"?(room.winnerId||active[0]?.id):null;$("scoreboard").innerHTML=ps.map((p,i)=>`<div class="player-row ${(p.score??0)<=0?"eliminated":""} ${p.id===winnerId?"winner":""}"><div><div class="player-name">${i+1}º ${esc(p.name)} ${p.id===winnerId?"🏆":""}</div><div class="player-sub">${(p.score??0)<=0?"Eliminado":p.id===state.playerId?"Você":""}</div></div><div class="score">${Math.max(0,p.score??0)}</div></div>`).join("")}
+function renderControls(room){$("hostControls").classList.toggle("hidden",!state.isHost||room.status==="finished");$("viewerNotice").classList.toggle("hidden",state.isHost||room.status==="finished");$("undoBtn").classList.toggle("hidden",!state.isHost||room.status==="finished");if(!state.isHost)return;$("controlPlayers").innerHTML=playersArray(room).map(p=>`<div class="controls-row"><div><strong>${esc(p.name)}</strong><div class="player-sub">${Math.max(0,p.score??0)} pontos</div></div><div class="control-buttons"><button class="mini minus1" data-id="${p.id}" data-delta="-1">Desistiu −1</button><button class="mini minus2" data-id="${p.id}" data-delta="-2">Perdeu −2</button><button class="mini plus1" data-id="${p.id}" data-delta="1">Corrigir +1</button></div></div>`).join("");document.querySelectorAll("[data-delta]").forEach(btn=>btn.onclick=()=>changeScore(btn.dataset.id,Number(btn.dataset.delta)))}
+async function changeScore(playerId,delta){const room=state.room,p=room.players[playerId];if(!p)return;const oldScore=p.score??0,newScore=Math.max(0,oldScore+delta),action=delta===-1?"desistiu":delta===-2?"perdeu":"correção",hRef=push(ref(db,`rooms/${room.code}/history`)),updates={};updates[`rooms/${room.code}/players/${playerId}/score`]=newScore;updates[`rooms/${room.code}/history/${hRef.key}`]={playerId,playerName:p.name,delta,oldScore,newScore,action,at:now()};await update(ref(db),updates)}
+function renderHistory(room){const items=Object.entries(room.history||{}).map(([id,h])=>({id,...h})).sort((a,b)=>(b.at??0)-(a.at??0)).slice(0,12);$("historyList").innerHTML=items.length?items.map(h=>`<div class="history-item"><span><strong>${esc(h.playerName)}</strong> — ${h.action}</span><span>${h.delta>0?"+":""}${h.delta}</span></div>`).join(""):`<p class="muted">Nenhum lançamento ainda.</p>`}
+$("startGameBtn").onclick=async()=>{if(!state.isHost)return;const count=Object.keys(state.room.players||{}).length;if(count<2)return toast("Entre com pelo menos 2 jogadores.");await update(roomRef(state.roomCode),{status:"playing",startedAt:now()})};
+$("endGameBtn").onclick=async()=>{if(!state.isHost)return;const winner=playersArray(state.room)[0];if(!confirm(`Encerrar a partida? Vencedor atual: ${winner?.name||"—"}`))return;await update(roomRef(state.roomCode),{status:"finished",finishedAt:now(),winnerId:winner?.id||null})};
+$("undoBtn").onclick=async()=>{if(!state.isHost)return;const entries=Object.entries(state.room.history||{}).map(([id,h])=>({id,...h})).sort((a,b)=>(b.at??0)-(a.at??0)),last=entries[0];if(!last)return toast("Nada para desfazer.");const updates={};updates[`rooms/${state.roomCode}/players/${last.playerId}/score`]=last.oldScore;updates[`rooms/${state.roomCode}/history/${last.id}`]=null;await update(ref(db),updates)};
+$("shareBtn").onclick=async()=>{const url=`${location.origin}${location.pathname}#${state.roomCode}`,text=`Entre na partida do Cacheta Master. Código: ${state.roomCode}\n${url}`;try{if(navigator.share)await navigator.share({title:"Cacheta Master",text,url});else{await navigator.clipboard.writeText(text);toast("Link copiado.")}}catch{}};
+async function boot(){const code=location.hash.replace("#","").trim().toUpperCase();if(code.length===6){$("roomCodeInput").value=code;const snap=await get(roomRef(code));if(snap.exists()){const room=snap.val();state.roomCode=code;state.isHost=localStorage.getItem(`cm_host_${code}`)===room.hostToken;if(room.players?.[state.playerId])subscribeRoom(code);else show("joinView");return}}show("homeView")}
+boot();if("serviceWorker"in navigator)navigator.serviceWorker.register("./service-worker.js").catch(()=>{});
